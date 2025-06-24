@@ -1,0 +1,2 @@
+#!/bin/bash
+/usr/local/bin/update_s2s_blacklist.sh >> /var/log/s2s_blacklist_update.log 2>&1
