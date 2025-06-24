@@ -2,85 +2,41 @@
 
 set -e
 
+source "$(dirname "${BASH_SOURCE[0]}")/libs.sh"
+
 SCRIPT_VERSION="1.0.0"
 BACKUP_DIR="/etc/prosody/backups/$(date +%Y%m%d_%H%M%S)"
 LOG_FILE="/var/log/prosody-install.log"
 
-FN_LOG() {
-  echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" | tee -a "$LOG_FILE"
+FN_LOG_FILE() {
+  local level="$1"; shift
+  FN_LOG "$level" "$*"
+  echo "[$(date '+%Y-%m-%d %H:%M:%S')] [$level] $*" >> "$LOG_FILE"
 }
 
-FN_DOMAIN_REGEX() {
-  if [[ ! "$1" =~ ^[a-zA-Z0-9][a-zA-Z0-9.-]*[a-zA-Z0-9]\.[a-zA-Z]{2,}$ ]]; then
-    return 1
-  fi
-  return 0
-}
-
-FN_IP_REGEX() {
-  if [[ ! "$1" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
-    return 1
-  fi
-  return 0
-}
-
-FN_YN() {
-  while true; do
-    read -p "$1 [y/n]: " answer
-    case $answer in
-      [Yy]* ) return 0;;
-      [Nn]* ) return 1;;
-      * ) echo "Please answer y or n.";;
-    esac
-  done
-}
-
-# sudo check
 if [ "$EUID" -ne 0 ]; then
-  echo "Please run as root"
+  FN_LOG error "Please run as root"
   exit 1
 fi
 
-. /etc/os-release
-if [ "$ID" != "ubuntu" ] || [ "$VERSION_ID" != "22.04" ]; then
-  echo "This script requires Ubuntu 22.04"
-  exit 1
-fi
+FN_LOG_FILE info "Starting Prosody installation"
 
-FN_LOG "Starting Prosody installation"
+FN_PROMPT DOMAIN "XMPP domain" "" "domain" "true"
 
-# domain
+FN_PROMPT ADMIN_USER "Admin username" "" "username" "true"
+
 while true; do
-  read -p "XMPP domain: " DOMAIN
-  if FN_DOMAIN_REGEX "$DOMAIN"; then
-    break
-  fi
-  echo "Invalid domain"
-done
-
-# admin username
-read -p "Admin username: " ADMIN_USER
-
-# admin password
-while true; do
-  read -s -p "Admin password (min 12 chars): " ADMIN_PASS
+  FN_CMSG "6:0:B" "Admin password (min 12 chars): "
+  read -s ADMIN_PASS
   echo
   if [ ${#ADMIN_PASS} -ge 12 ]; then
     break
   fi
-  echo "Password too short"
+  FN_LOG warn "Password too short"
 done
 
-# admin IP
-while true; do
-  read -p "Admin IP address: " ADMIN_IP
-  if FN_IP_REGEX "$ADMIN_IP"; then
-    break
-  fi
-  echo "Invalid IP"
-done
+FN_PROMPT ADMIN_IP "Admin IP address" "" "ip" "true"
 
-# Optional features
 ENABLE_MUC=false
 if FN_YN "Enable group chat?"; then
   ENABLE_MUC=true
@@ -91,19 +47,17 @@ if FN_YN "Enable file uploads?"; then
   ENABLE_UPLOAD=true
 fi
 
-FN_LOG "Installing packages"
+FN_LOG_FILE info "Installing packages"
 apt-get update
 apt-get install -y prosody certbot ufw fail2ban lua5.2 lua-sec
 
-# Backup existing config
 if [ -f /etc/prosody/prosody.cfg.lua ]; then
   mkdir -p "$BACKUP_DIR"
   cp /etc/prosody/prosody.cfg.lua "$BACKUP_DIR/"
 fi
 
-FN_LOG "Configuring Prosody"
+FN_LOG_FILE info "Configuring Prosody"
 
-# Create basic config
 cat > /etc/prosody/prosody.cfg.lua << EOF
 admins = { "$ADMIN_USER@$DOMAIN" }
 
@@ -174,7 +128,7 @@ Component "upload.$DOMAIN" "http_upload"
 EOF
 fi
 
-FN_LOG "Getting SSL certificates"
+FN_LOG_FILE info "Getting SSL certificates"
 systemctl stop prosody 2>/dev/null || true
 
 certbot certonly --standalone --non-interactive --agree-tos \
@@ -190,24 +144,24 @@ if [ "$ENABLE_UPLOAD" = true ]; then
     --register-unsafely-without-email -d "upload.$DOMAIN"
 fi
 
-# Link certificates
+# 인증서 링크
 mkdir -p "/etc/prosody/certs/$DOMAIN"
 ln -sf "/etc/letsencrypt/live/$DOMAIN/fullchain.pem" "/etc/prosody/certs/$DOMAIN/"
 ln -sf "/etc/letsencrypt/live/$DOMAIN/privkey.pem" "/etc/prosody/certs/$DOMAIN/"
 chown -R prosody:prosody /etc/prosody/certs
 
-FN_LOG "Configuring firewall"
+FN_LOG_FILE info "Configuring firewall"
 ufw --force reset
 ufw default deny incoming
 ufw default allow outgoing
 ufw allow ssh
 ufw allow 5222/tcp  # XMPP client
 ufw allow 5269/tcp  # XMPP server
-ufw allow 80/tcp  # HTTP
-ufw allow 443/tcp   # HTTPS
+# ufw allow 80/tcp    # HTTP
+# ufw allow 443/tcp   # HTTPS
 ufw --force enable
 
-FN_LOG "Setting up fail2ban"
+FN_LOG_FILE info "Setting up fail2ban"
 cat > /etc/fail2ban/filter.d/prosody-auth.conf << 'EOF'
 [Definition]
 failregex = Failed authentication.*from IP: <HOST>
@@ -226,26 +180,26 @@ EOF
 
 systemctl restart fail2ban
 
-FN_LOG "Starting Prosody"
+FN_LOG_FILE info "Starting Prosody"
 systemctl enable prosody
 systemctl start prosody
 sleep 3
 
-# Create admin user
 echo "$ADMIN_PASS" | prosodyctl adduser "$ADMIN_USER@$DOMAIN"
 
-# Setup cert renewal
 echo '#!/bin/bash
 certbot renew --quiet --post-hook "systemctl reload prosody"' > /etc/cron.daily/prosody-cert-renewal
 chmod +x /etc/cron.daily/prosody-cert-renewal
 
-echo ; echo "[O] Install Complete ==="
+echo
+FN_CMSG "2:0:B" "Install Complete"
 echo "Domain: $DOMAIN"
 echo "Admin Info: $ADMIN_USER@$DOMAIN"
 echo "Prosody status: $(systemctl is-active prosody)"
 echo "Configuration: /etc/prosody/prosody.cfg.lua"
 echo "Logs: /var/log/prosody/"
-echo "Backup: $BACKUP_DIR"; echo 
+echo "Backup: $BACKUP_DIR"
+echo
 
 if [ "$ENABLE_MUC" = true ]; then
   echo "Group chat: conference.$DOMAIN"
@@ -255,4 +209,4 @@ if [ "$ENABLE_UPLOAD" = true ]; then
   echo "File upload: upload.$DOMAIN"
 fi
 
-FN_LOG "Installation completed"
+FN_LOG_FILE info "Installation completed"
